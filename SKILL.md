@@ -24,6 +24,29 @@ description: 从国家中小学智慧教育平台下载中小学电子课本并�
 脚本位于本 skill 的 `scripts/` 目录。首次运行会下载约 33 MB 的教材目录并缓存
 （存于 `~/.cache/smartedu/`），之后除非平台更新否则不再重复下载。
 
+### 0. 先决定用哪个检索入口（重要）
+
+**优先用 `--search`，谨慎用 `--subject`。**
+
+平台的 `subject` 字段并不总是存科目名——**英语类教材的 subject 里存的是年度**
+（如 `2026年度`），而真正的 `subject=英语` 只有接力社版、重庆大学版等少数冷门版本。
+因此：
+
+```bash
+python scripts/download.py --grade 三年级 --subject 英语   # ❌ 搜不到译林版/人教 PEP/沪教版
+```
+
+会漏掉绝大多数主流英语教材，很容易误判成"平台上没有这本"。
+
+`--search` 是在**书名**里做包含匹配，不受该问题影响，是更可靠的入口：
+
+```bash
+python scripts/download.py --search "译林版 三年级 英语 上册"   # ✅ 能命中
+```
+
+只有当 `--search` 结果过多、需要进一步收敛时，才叠加 `--grade` / `--version` / `--volume`
+等结构化参数。
+
 ### 1. 直接下载（最常用）
 
 ```bash
@@ -71,6 +94,67 @@ python scripts/download.py --url "<复制的图片地址>"
 | `--keep-pages` | 保留单页图片（默认合成 PDF 后删除） |
 | `--force` | 已存在时重新下载 |
 | `--refresh` | 强制刷新教材目录缓存 |
+| `--yes` | 非交互模式：条件不唯一时直接报错而非等待选择（AI 调用建议常带） |
+| `--quiet` | 减少输出 |
+| `--stage` | 学段过滤：小学 / 初中 / 高中 |
+| `--id` / `--ts` / `--name` | 配合 `--url` 的回退参数（contentId / timestamp / 自定义文件名） |
+
+## 同名多条目：如何选到最新版
+
+同一本教材在目录里可能有多条记录（按年度区分），而**书名完全相同**：
+
+```
+匹配到 3 本，请选择：
+   1. …英语 三年级上册  [小学 · 三年级上册 · 2024年度 · 译林版]
+   2. …英语 三年级上册  [小学 · 三年级上册 · 2025年度 · 译林版]
+   3. …英语 三年级上册  [小学 · 三年级上册 · 2026年度 · 译林版]
+```
+
+- 默认进入**交互式编号选择**；非交互环境（AI 调用）下无法作答。加 `--yes` 会立即
+  报错退出（明确失败，可捕获），**AI 调用时建议始终带上 `--yes`**
+- 规避：把年度当作 subject 传入，直接锁定最新那条
+
+  ```bash
+  python scripts/download.py --grade 三年级 --subject 2026年度 --version 译林版 --volume 上册
+  ```
+
+- 拿不准哪年最新：直接查缓存 `~/.cache/smartedu/catalog.json`，比较 `timestamp`
+  （毫秒时间戳，**取最大者**即为最新版本）
+
+## 高中教材：subject 字段是册次，不是科目
+
+义务教育阶段（小学/初中）`subject` 是正常科目名；**高中教材的 `subject` 存的是
+册次**（如 `必修 第一册`），`volume` 为空，科目名只出现在书名里。因此：
+
+```bash
+python scripts/download.py --grade 高中年级 --subject 物理   # ❌ 永远搜不到
+```
+
+结构化参数无法表达"科目"，只能用 `--search` 按标题匹配。利用标题里
+「教科书·{科目}必修」这个**连续子串**可精确排除「选择性必修」：
+
+```bash
+python scripts/download.py --search "教科书·物理必修 第一册" --version 人教版 --yes
+python scripts/download.py --search "教科书·语文必修 上册" --yes
+```
+
+注意「必修」是「选择性必修」的子串，搜索词务必带上「教科书·{科目}必修」整段，
+否则会把选择性必修一起捞出来。
+
+### 归档目录没有科目层
+
+由于 `subject` 被册次占据，下载后的目录是
+`{out}/高中年级/必修 第一册/{版本}/…`，**多科混在册次目录下，没有科目层**。
+下载后需按文件名中的科目手工归类（把 PDF 和 info.json 移到 `{科目}/` 下，
+并把 info.json 的 `subject` 修正为科目名、`volume` 修正为册次）：
+
+```
+扬州市高一（必修一）/
+  语文/普通高中教科书·语文必修 上册.pdf
+  数学/普通高中教科书·数学必修 第一册.pdf
+  英语/普通高中教科书·英语必修 第一册.pdf
+  物理/普通高中教科书·物理必修 第一册.pdf
+```
 
 ## 输出结构
 
@@ -83,12 +167,42 @@ python scripts/download.py --url "<复制的图片地址>"
         info.json          ← 坐标、页数、下载时间等存档
 ```
 
+> 若归档目录名异常（例如出现 `三年级上册/2026年度/…` 而不是科目名），
+> 说明该教材的 `subject` 字段被平台填成了年度（见上文"同名多条目"）。
+> 把文件夹挪到正确科目下、并顺手修正 `info.json` 的 `subject` 字段即可，PDF 本身不受影响。
+
 ## 重要：提醒用户核对版次
 
 2024–2025 年正是义务教育教材按 2022 年版新课标换版的窗口期，**新旧版单元结构差异很大**。
 
 下载完成后**务必提醒用户**：翻到 PDF 的版权页（通常在第 3–5 页）核对「版次」，
 确认与孩子在用的课本一致。新版教材书名带有「（根据2022年版课程标准修订）」前缀。
+
+### 可选：用 OCR 直接读出版次
+
+教材 PDF 由扫描图合成，**没有文本层**，无法直接复制文字。需要确凿证据时可 OCR 版权页：
+
+```bash
+pip install pymupdf rapidocr-onnxruntime
+```
+
+```python
+import pymupdf as fitz, numpy as np
+from PIL import Image
+from rapidocr_onnxruntime import RapidOCR
+
+doc = fitz.open("教材.pdf")
+for i in (2, 3):                      # 版权页通常在第 3–5 页
+    pix = doc[i].get_pixmap(dpi=200)
+    res, _ = RapidOCR()(np.array(Image.frombytes("RGB", (pix.width, pix.height), pix.samples)))
+    for box, txt, score in (res or []):
+        if score > 0.4 and any(k in txt for k in ("版", "印刷", "ISBN")):
+            print(txt)
+```
+
+读出的形如 `2026年7月第3次印刷`、`ISBN 978-7-5753-0037-7`，与孩子课本封底比对即可，
+这是最硬的验真方式。注意：部分数字教材的版权页**不含版次/ISBN 行**（如统编版语文），
+读不出来属正常现象，不必反复重试。
 
 ## 交互原则
 
